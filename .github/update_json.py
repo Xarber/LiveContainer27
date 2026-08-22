@@ -1,353 +1,497 @@
+import argparse
 import json
-import plistlib
-import re
-import requests
 import os
-from datetime import datetime
+import re
+import urllib.error
+import urllib.request
+from copy import deepcopy
+from datetime import datetime, timezone
 
-def prepare_description(text):
-    text = re.sub('<[^<]+?>', '', text) # Remove HTML tags
-    text = re.sub(r'#{1,6}\s?', '', text) # Remove markdown header tags
-    text = re.sub(r'\*{2}', '', text) # Remove all occurrences of two consecutive asterisks
-    text = re.sub(r'(?<=\r|\n)-', '•', text) # Only replace - with • if it is preceded by \r or \n
-    text = re.sub(r'`', '"', text) # Replace ` with "
-    text = re.sub(r'\r\n\r\n', '\r \n', text) # Replace \r\n\r\n with \r \n (avoid incorrect display of the description regarding paragraphs)
-    return text
 
-def fetch_latest_release(repo_url, is_nightly: bool):
-    api_url = f"https://api.github.com/repos/{repo_url}/releases"
+JSON_FILE = ".github/apps.json"
+STATE_RELEASE_TAG = "1.0"
+
+LIVE_CONTAINER_APP_ID = "com.kdt.livecontainer"
+DEFAULT_APP_NAME = "LiveContainer + SideStore"
+
+SIDESTORE_ASSET = "LiveContainer+SideStore.ipa"
+STANDALONE_ASSET = "LiveContainer.ipa"
+
+CHANNELS = (
+    "stable",
+    "nightly",
+    "stable-standalone",
+    "nightly-standalone",
+)
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="Update the LiveContainer AltStore source."
+    )
+    parser.add_argument(
+        "--repository",
+        required=True,
+        help="GitHub repository in owner/name format.",
+    )
+    return parser.parse_args()
+
+
+ARGS = parse_arguments()
+
+REPOSITORY = ARGS.repository
+RELEASE_TAG = os.environ.get("RELEASE_TAG", "")
+IS_NIGHTLY = (
+    os.environ.get("IS_NIGHTLY", "true").strip().lower() != "false"
+)
+COMMIT_SHA = os.environ.get("COMMIT_SHA", "")
+COMMIT_MESSAGE = os.environ.get("COMMIT_MESSAGE", "").strip()
+WORKFLOW_URL = os.environ.get("WORKFLOW_URL", "")
+
+
+def github_headers():
+    token = os.environ.get("GITHUB_TOKEN")
+
     headers = {
         "Accept": "application/vnd.github+json",
-    }
-    try:
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-        releases = response.json()
-        latest_release = next((
-            release for release in releases
-            if (release["tag_name"] == "nightly") == is_nightly
-        ), None)
-        return [latest_release] if latest_release else []
-    except requests.RequestException as e:
-        print(f"Error fetching releases: {e}")
-        raise
-
-def get_file_size(url):
-    try:
-        response = requests.head(url)
-        response.raise_for_status()
-        return int(response.headers.get('Content-Length', 0))
-    except requests.RequestException as e:
-        print(f"Error getting file size: {e}")
-        return 194586
-
-def update_json_file_release(repo_url, json_file, latest_release):
-    if isinstance(latest_release, list) and latest_release:
-        latest_release = latest_release[0]
-    else:
-        print("Error getting latest release")
-        return
-
-    try:
-        apps_json_url = f"https://github.com/{repo_url}/releases/download/1.0/apps.json"
-        response = requests.get(apps_json_url)
-        response.raise_for_status()
-        data = response.json()
-    except json.JSONDecodeError as e:
-        print(f"Error reading JSON file: {e}")
-        data = {"apps": []}
-        raise
-
-    app = data["apps"][0]
-
-    with open("LiveContainer/Info.plist", 'rb') as infile:
-        info_plist = plistlib.load(infile)
-    full_version = info_plist["CFBundleVersion"]
-
-    tag = latest_release["tag_name"]
-    version = re.search(r"(\d+\.\d+\.\d+)", full_version).group(1)
-    version_date = latest_release["published_at"]
-    date_obj = datetime.strptime(version_date, "%Y-%m-%dT%H:%M:%SZ")
-
-    description = latest_release["body"]
-    description = prepare_description(description)
-
-    assets = latest_release.get("assets", [])
-    download_url = None
-    size = None
-    for asset in assets:
-        if asset["name"] == f"LiveContainer.ipa":
-            download_url = asset["browser_download_url"]
-            size = asset["size"]
-            break
-
-    if download_url is None or size is None:
-        print("Error: IPA file not found in release assets.")
-        return
-
-    version_entry = {
-        "version": version,
-        "date": version_date,
-        "localizedDescription": description,
-        "downloadURL": download_url,
-        "size": size
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "LiveContainer-AltStore-Updater",
     }
 
-    duplicate_entries = [item for item in app["versions"] if item["version"] == version]
-    if duplicate_entries:
-        app["versions"].remove(duplicate_entries[0])
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
-    app["versions"].insert(0, version_entry)
+    return headers
 
-    app.update({
-        "version": version,
-        "versionDate": version_date,
-        "versionDescription": description,
-        "downloadURL": download_url,
-        "size": size
-    })
 
-    if "news" not in data:
-        data["news"] = []
-
-    news_identifier = f"release-{full_version}"
-    date_string = date_obj.strftime("%d/%m/%y")
-    news_entry = {
-        "appID": "com.kdt.livecontainer",
-        "caption": f"Update of LiveContainer just got released!",
-        "date": latest_release["published_at"],
-        "identifier": news_identifier,
-        "imageURL": "https://raw.githubusercontent.com/LiveContainer/LiveContainer/main/screenshots/release.png",
-        "notify": True,
-        "tintColor": "#0784FC",
-        "title": f"{full_version} - LiveContainer  {date_string}",
-        "url": f"https://github.com/LiveContainer/LiveContainer/releases/tag/{tag}"
-    }
-
-    news_entry_exists = any(item["identifier"] == news_identifier for item in data["news"])
-    if not news_entry_exists:
-        data["news"].append(news_entry)
+def github_api_get(url):
+    request = urllib.request.Request(
+        url,
+        headers=github_headers(),
+        method="GET",
+    )
 
     try:
-        with open(json_file, "w") as file:
-            json.dump(data, file, indent=2)
-        print("JSON file updated successfully.")
-    except IOError as e:
-        print(f"Error writing to JSON file: {e}")
-        raise
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"GitHub API request failed with HTTP {error.code}: {body}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"Unable to connect to GitHub API: {error}"
+        ) from error
 
-def update_json_file_nightly(json_file, nightly_release):
-    if isinstance(nightly_release, list) and nightly_release:
-        nightly_release = next((item for item in nightly_release if item["tag_name"] == "nightly"), None)
-    else:
-        print("Error getting nightly release")
-        return
+
+def github_download(url):
+    request = urllib.request.Request(
+        url,
+        headers=github_headers(),
+        method="GET",
+    )
 
     try:
-        with open(json_file, "r") as file:
-            data = json.load(file)
-    except json.JSONDecodeError as e:
-        print(f"Error reading JSON file: {e}")
-        data = {"apps": []}
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"GitHub download failed with HTTP {error.code}: {body}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"Unable to download from GitHub: {error}"
+        ) from error
+
+
+def prepare_description(text):
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+        r"\2",
+        text,
+    )
+    text = re.sub(r"<[^<]+?>", "", text)
+    text = re.sub(r"#{1,6}\s?", "", text)
+    text = re.sub(r"\*{2}", "", text)
+    text = re.sub(r"(?<=\r|\n)-", "•", text)
+    text = re.sub(r"`", '"', text)
+    text = re.sub(r"\r\n\r\n", "\r\n", text)
+
+    return text.strip()
+
+
+def load_base_json():
+    with open(JSON_FILE, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"{JSON_FILE} must contain a JSON object at the root."
+        )
+
+    return data
+
+
+def load_persistent_json():
+    release_url = (
+        f"https://api.github.com/repos/{REPOSITORY}/releases/tags/"
+        f"{STATE_RELEASE_TAG}"
+    )
+
+    try:
+        release = github_api_get(release_url)
+    except RuntimeError as error:
+        if "HTTP 404" in str(error):
+            print("No existing 1.0 release found.")
+            return None
         raise
 
-    app = data["apps"][0]
+    for asset in release.get("assets", []):
+        if asset.get("name") != "apps.json":
+            continue
 
-    with open("LiveContainer/Info.plist", 'rb') as infile:
-        info_plist = plistlib.load(infile)
-    full_version = info_plist["CFBundleVersion"]
-    tag = nightly_release["tag_name"]
-    version = re.search(r"(\d+\.\d+\.\d+)", full_version).group(1)
-    version_date = nightly_release["published_at"]
-    date_obj = datetime.strptime(version_date, "%Y-%m-%dT%H:%M:%SZ")
+        download_url = asset.get("browser_download_url")
+        if not download_url:
+            raise RuntimeError(
+                "The existing 1.0 release contains apps.json "
+                "but has no download URL."
+            )
 
-    nightly_link = os.environ.get("NIGHTLY_LINK", "")
-    commit_sha = os.environ.get("commit_sha", "")[:7]
-    commit_msg = os.environ.get("commit_msg", "").strip()
+        print("Loading current release state from 1.0.")
+        raw_data = github_download(download_url)
 
-    description = f"""\
-Nightly build from [{commit_sha}](https://github.com/LiveContainer/LiveContainer/commit/{commit_sha}):\
- {commit_msg}
+        try:
+            data = json.loads(raw_data.decode("utf-8"))
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "The apps.json asset in the 1.0 release is not valid JSON."
+            ) from error
 
-This is a nightly release [created automatically with GitHub Actions workflow]({nightly_link}).
-"""
-    description = prepare_description(description)
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "The apps.json asset in the 1.0 release "
+                "must contain a JSON object."
+            )
 
-    assets = nightly_release.get("assets", [])
-    download_url = None
-    size = None
-    for asset in assets:
-        if asset["name"] == f"LiveContainer.ipa":
-            download_url = asset["browser_download_url"]
-            size = asset["size"]
-            break
+        return data
 
-    if download_url is None or size is None:
-        print("Error: IPA file not found in release assets.")
-        return
+    print("The 1.0 release contains no apps.json asset.")
+    return None
 
-    version_entry = {
-        "version": version,
-        "date": version_date,
-        "localizedDescription": description,
-        "downloadURL": download_url,
-        "size": size,
-        "commit": commit_sha,
-        "headline": commit_msg
+
+def save_json(data):
+    with open(JSON_FILE, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, ensure_ascii=False)
+        file.write("\n")
+
+
+def get_info_plist_versions():
+    import plistlib
+
+    with open("LiveContainer/Info.plist", "rb") as file:
+        info = plistlib.load(file)
+
+    version = info.get("CFBundleShortVersionString")
+    build_version = info.get("CFBundleVersion")
+
+    if not isinstance(version, str) or not version:
+        raise RuntimeError(
+            "LiveContainer/Info.plist has no valid "
+            "CFBundleShortVersionString."
+        )
+
+    if not isinstance(build_version, str) or not build_version:
+        raise RuntimeError(
+            "LiveContainer/Info.plist has no valid CFBundleVersion."
+        )
+
+    return version, build_version
+
+
+def get_release():
+    if not RELEASE_TAG:
+        raise RuntimeError("RELEASE_TAG is not set.")
+
+    url = (
+        f"https://api.github.com/repos/{REPOSITORY}/releases/tags/"
+        f"{RELEASE_TAG}"
+    )
+
+    return github_api_get(url)
+
+
+def get_asset(release, filename):
+    for asset in release.get("assets", []):
+        if asset.get("name") == filename:
+            return asset
+
+    raise RuntimeError(
+        f"Asset {filename!r} was not found in release "
+        f"{release.get('tag_name')!r}."
+    )
+
+
+def release_download_url(release, filename):
+    asset = get_asset(release, filename)
+
+    return asset["browser_download_url"], asset["size"]
+
+
+def release_date(release):
+    published_at = release.get("published_at") or release.get("created_at")
+
+    if published_at:
+        return published_at
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def get_release_description(release):
+    if not IS_NIGHTLY:
+        return prepare_description(release.get("body") or "")
+
+    commit = COMMIT_SHA[:7] if COMMIT_SHA else "unknown"
+    message = COMMIT_MESSAGE or "No commit message available."
+
+    lines = [
+        f"Nightly build from commit {commit}.",
+        message,
+    ]
+
+    if COMMIT_SHA:
+        lines.append(
+            f"Commit: https://github.com/{REPOSITORY}/commit/{COMMIT_SHA}"
+        )
+
+    if WORKFLOW_URL:
+        lines.append(f"Workflow: {WORKFLOW_URL}")
+
+    return "\n\n".join(lines)
+
+
+def channel_map(app):
+    channels = app.get("releaseChannels")
+
+    if not isinstance(channels, list):
+        return {}
+
+    return {
+        channel.get("track"): channel
+        for channel in channels
+        if isinstance(channel, dict)
+        and isinstance(channel.get("track"), str)
     }
 
-    app["versions"].clear()
-    app["versions"].append(version_entry)
 
-    app.update({
-        "version": version,
-        "versionDate": version_date,
-        "versionDescription": description,
-        "downloadURL": download_url,
-        "size": size,
-        "commit": commit_sha,
-        "headline": commit_msg
-    })
+def is_current_architecture(data):
+    if not isinstance(data, dict):
+        return False
 
+    apps = data.get("apps")
+    if not isinstance(apps, list) or len(apps) != 1:
+        return False
+
+    app = apps[0]
+    if not isinstance(app, dict):
+        return False
+
+    if app.get("name") != DEFAULT_APP_NAME:
+        return False
+
+    if app.get("bundleIdentifier") != LIVE_CONTAINER_APP_ID:
+        return False
+
+    channels = channel_map(app)
+
+    return all(track in channels for track in CHANNELS)
+
+
+def clean_source_from_base(base, persistent):
+    data = deepcopy(base)
+
+    apps = data.get("apps")
+    if not isinstance(apps, list) or len(apps) != 1:
+        raise RuntimeError(
+            f"{JSON_FILE} must contain exactly one canonical app."
+        )
+
+    app = apps[0]
+    if not isinstance(app, dict):
+        raise RuntimeError(
+            f"{JSON_FILE} contains an invalid app object."
+        )
+
+    if app.get("name") != DEFAULT_APP_NAME:
+        raise RuntimeError(
+            f"{JSON_FILE} must name its only app {DEFAULT_APP_NAME!r}."
+        )
+
+    if app.get("bundleIdentifier") != LIVE_CONTAINER_APP_ID:
+        raise RuntimeError(
+            f"{JSON_FILE} must use {LIVE_CONTAINER_APP_ID!r}."
+        )
+
+    for key in (
+        "version",
+        "versionDate",
+        "versionDescription",
+        "downloadURL",
+        "size",
+    ):
+        app.pop(key, None)
+
+    app["versions"] = []
+    app["releaseChannels"] = [
+        {"track": track, "releases": []}
+        for track in CHANNELS
+    ]
     data["news"] = []
 
-    try:
-        with open(json_file, "w") as file:
-            json.dump(data, file, indent=2)
-        print("JSON file updated successfully.")
-    except IOError as e:
-        print(f"Error writing to JSON file: {e}")
-        raise
+    if not is_current_architecture(persistent):
+        if persistent is not None:
+            print(
+                "Ignoring legacy 1.0 state because it does not use "
+                "the one-app architecture."
+            )
+        return data
 
-def update_json_file_release_ss_lc(repo_url, json_file, latest_release, is_nightly: bool):
-    if isinstance(latest_release, list) and latest_release:
-        latest_release = latest_release[0]
-    else:
-        print("Error getting latest release")
-        return
+    previous_app = persistent["apps"][0]
+    previous_versions = previous_app.get("versions", [])
 
-    try:
-        apps_json_url = f"https://github.com/{repo_url}/releases/download/1.0/apps_ss_lc.json"
-        response = requests.get(apps_json_url)
-        response.raise_for_status()
-        data = response.json()
-    except json.JSONDecodeError as e:
-        print(f"Error reading JSON file: {e}")
-        data = {"apps": []}
-        raise
+    if previous_versions and isinstance(previous_versions[0], dict):
+        app["versions"] = [deepcopy(previous_versions[0])]
+
+    previous_channels = channel_map(previous_app)
+    current_channels = channel_map(app)
+
+    for track in CHANNELS:
+        previous_releases = previous_channels[track].get("releases", [])
+
+        if previous_releases and isinstance(previous_releases[0], dict):
+            current_channels[track]["releases"] = [
+                deepcopy(previous_releases[0])
+            ]
+
+    return data
+
+
+def make_version_entry(
+    version,
+    build_version,
+    date,
+    description,
+    download_url,
+    size,
+    nightly=False,
+):
+    entry = {
+        "version": version,
+        "buildVersion": build_version,
+        "date": date,
+        "localizedDescription": description,
+        "downloadURL": download_url,
+        "size": size,
+    }
+
+    if nightly:
+        entry["commit"] = COMMIT_SHA[:7]
+        entry["headline"] = COMMIT_MESSAGE
+
+    return entry
+
+
+def set_channel_release(app, track, entry):
+    channels = channel_map(app)
+
+    if track not in channels:
+        raise RuntimeError(f"Missing required release channel: {track}")
+
+    channels[track]["releases"] = [entry]
+
+
+def update_source():
+    print(f"Repository: {REPOSITORY}")
+    print(f"Release tag: {RELEASE_TAG}")
+    print(f"Nightly: {IS_NIGHTLY}")
+
+    base = load_base_json()
+    persistent = load_persistent_json()
+    data = clean_source_from_base(base, persistent)
+
+    version, build_version = get_info_plist_versions()
+    release = get_release()
+    date = release_date(release)
+    description = get_release_description(release)
+
+    standalone_url, standalone_size = release_download_url(
+        release,
+        STANDALONE_ASSET,
+    )
+    sidestore_url, sidestore_size = release_download_url(
+        release,
+        SIDESTORE_ASSET,
+    )
+
+    standalone_entry = make_version_entry(
+        version=version,
+        build_version=build_version,
+        date=date,
+        description=description,
+        download_url=standalone_url,
+        size=standalone_size,
+        nightly=IS_NIGHTLY,
+    )
+    sidestore_entry = make_version_entry(
+        version=version,
+        build_version=build_version,
+        date=date,
+        description=description,
+        download_url=sidestore_url,
+        size=sidestore_size,
+        nightly=IS_NIGHTLY,
+    )
 
     app = data["apps"][0]
 
-    with open("LiveContainer/Info.plist", 'rb') as infile:
-        info_plist = plistlib.load(infile)
-    full_version = info_plist["CFBundleVersion"]
-
-    tag = latest_release["tag_name"]
-    version = re.search(r"(\d+\.\d+\.\d+)", full_version).group(1)
-    version_date = latest_release["published_at"]
-    date_obj = datetime.strptime(version_date, "%Y-%m-%dT%H:%M:%SZ")
-
-    commit_sha = os.environ.get("commit_sha", "")[:7]
-    commit_msg = os.environ.get("commit_msg", "").strip()
-
-    description = f"""\
-Nightly build from [{commit_sha}](https://github.com/LiveContainer/LiveContainer/commit/{commit_sha}):\
- {commit_msg}
-    """
-    assets = latest_release.get("assets", [])
-    download_url = None
-    size = None
-    for asset in assets:
-        if asset["name"] == f"LiveContainer+SideStore.ipa":
-            download_url = asset["browser_download_url"]
-            size = asset["size"]
-            break
-
-    if download_url is None or size is None:
-        print("Error: IPA file not found in release assets.")
-        return
-
-    version_entry = {
-        "version": version,
-        "date": version_date,
-        "localizedDescription": description,
-        "downloadURL": download_url,
-        "size": size
-    }
-
-    if not is_nightly:
-        duplicate_entries = [item for item in app["versions"] if item["version"] == version]
-        if duplicate_entries:
-            app["versions"].remove(duplicate_entries[0])
-
-        app["versions"].insert(0, version_entry)
-
-        app.update({
-            "version": version,
-            "versionDate": version_date,
-            "versionDescription": description,
-            "downloadURL": download_url,
-            "size": size
-        })
-        channels = app['releaseChannels']
-        for channel in channels:
-            if channel['track'] != 'stable':
-                continue
-            channel['releases'] = app["versions"]
-
-
-        if "news" not in data:
-            data["news"] = []
-
-        news_identifier = f"release-{full_version}"
-        date_string = date_obj.strftime("%d/%m/%y")
-        news_entry = {
-            "appID": "com.kdt.livecontainer",
-            "caption": f"Update of LiveContainer just got released!",
-            "date": latest_release["published_at"],
-            "identifier": news_identifier,
-            "imageURL": "https://raw.githubusercontent.com/LiveContainer/LiveContainer/main/screenshots/release.png",
-            "notify": True,
-            "tintColor": "#0784FC",
-            "title": f"{full_version} - LiveContainer  {date_string}",
-            "url": f"https://github.com/LiveContainer/LiveContainer/releases/tag/{tag}"
-        }
-
-        news_entry_exists = any(item["identifier"] == news_identifier for item in data["news"])
-        if not news_entry_exists:
-            data["news"].append(news_entry)
+    if IS_NIGHTLY:
+        set_channel_release(app, "nightly", sidestore_entry)
+        set_channel_release(
+            app,
+            "nightly-standalone",
+            standalone_entry,
+        )
     else:
-        channels = app['releaseChannels']
-        for channel in channels:
-            if channel['track'] != 'nightly':
-                continue
-            channel['releases'] = [version_entry]
-    try:
-        with open(json_file, "w") as file:
-            json.dump(data, file, indent=2)
-        print("JSON file updated successfully.")
-    except IOError as e:
-        print(f"Error writing to JSON file: {e}")
-        raise
+        app["versions"] = [sidestore_entry]
+        set_channel_release(app, "stable", sidestore_entry)
+        set_channel_release(
+            app,
+            "stable-standalone",
+            standalone_entry,
+        )
+
+    save_json(data)
+
+    print()
+    print("AltStore source updated successfully.")
+    print(f"Version: {version} ({build_version})")
+    print(f"Release: {RELEASE_TAG}")
+    print(f"Track: {'nightly' if IS_NIGHTLY else 'stable'}")
+    print(f"LiveContainer IPA: {standalone_url}")
+    print(f"SideStore IPA: {sidestore_url}")
 
 
 def main():
-    repo_url = "LiveContainer/LiveContainer"
-    is_nightly = "NIGHTLY_LINK" in os.environ
-
     try:
-        fetched_data_latest = fetch_latest_release(repo_url, is_nightly)
-        if is_nightly:
-            json_file = "./.github/apps_nightly.json"
-            update_json_file_nightly(json_file, fetched_data_latest)
-            update_json_file_release_ss_lc(repo_url, "./.github/apps_ss_lc.json", fetched_data_latest, True)
-        else:
-            json_file = "./.github/apps.json"
-            update_json_file_release(repo_url, json_file, fetched_data_latest)
-            update_json_file_release_ss_lc(repo_url, "./.github/apps_ss_lc.json", fetched_data_latest, False)
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        update_source()
+    except Exception as error:
+        print(f"ERROR: {error}")
         raise
+
 
 if __name__ == "__main__":
     main()
