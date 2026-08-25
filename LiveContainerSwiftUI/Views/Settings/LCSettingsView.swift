@@ -282,6 +282,12 @@ struct LCSettingsView: View {
                         }
                     }
                     HStack {
+                        Image("GitHub")
+                        Button("Xarber/LiveContainer27") {
+                            openXarberGitHub()
+                        }
+                    }
+                    HStack {
                         Image("Twitter")
                         Button("khanhduytran0") {
                             openTwitter()
@@ -460,6 +466,10 @@ struct LCSettingsView: View {
     
     func openGitHub() {
         UIApplication.shared.open(URL(string: "https://github.com/LiveContainer/LiveContainer")!)
+    }
+
+    func openXarberGitHub() {
+        UIApplication.shared.open(URL(string: "https://github.com/Xarber/LiveContainer27")!)
     }
     
     func openGitHub2() {
