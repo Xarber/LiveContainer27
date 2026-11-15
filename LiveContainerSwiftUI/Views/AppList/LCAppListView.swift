@@ -74,6 +74,125 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var helpPresent = false
     
     @State private var customSortViewPresent = false
+    @State private var completedInstall: UUID?
+    @State private var openFolder: String?
+    @StateObject private var folderNameInput = InputHelper()
+    @AppStorage("LCAppGridLayout", store: LCUtils.appGroupUserDefault) private var gridLayout = false
+    @AppStorage("LCAppGridFolders", store: LCUtils.appGroupUserDefault) private var folderData = Data()
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var folders: [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: folderData)) ?? [:]
+    }
+
+    private var gridColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: dynamicTypeSize.isAccessibilitySize ? 144 : 88), spacing: 8)]
+    }
+
+    private func folderKey(for app: LCAppModel) -> String? {
+        sharedAppSortManager.getUniqueIdentifier(for: app)
+    }
+
+    @ViewBuilder
+    private var visibleAppCollection: some View {
+        if gridLayout && searchContext.debouncedQuery.isEmpty {
+            let assignments = folders
+            let groups = Dictionary(grouping: filteredApps) { app in
+                folderKey(for: app).flatMap { assignments[$0] }
+            }
+            if let openFolder, let apps = groups[openFolder] {
+                Button {
+                    self.openFolder = nil
+                } label: {
+                    Label(openFolder, systemImage: "chevron.backward")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 4)
+                appCollection(apps)
+            } else {
+                LazyVGrid(columns: gridColumns, spacing: 4) {
+                    ForEach(groups.keys.compactMap { $0 }.sorted {
+                        $0.localizedStandardCompare($1) == .orderedAscending
+                    }, id: \.self) { folder in
+                        Button {
+                            openFolder = folder
+                        } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: "folder.fill")
+                                    .font(.title)
+                                    .frame(width: 60, height: 60)
+                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
+                                Text(folder)
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 8)
+                            .frame(height: LCAppBannerRootView.tileHeight, alignment: .top)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    appTiles(groups[nil] ?? [])
+                }
+            }
+        } else {
+            appCollection(filteredApps)
+        }
+    }
+
+    @ViewBuilder
+    private func appCollection(_ apps: [LCAppModel]) -> some View {
+        if gridLayout {
+            LazyVGrid(columns: gridColumns, spacing: 4) { appTiles(apps) }
+        } else {
+            LazyVStack {
+                ForEach(apps, id: \.self) { app in
+                    LCAppBanner(appModel: app, delegate: self)
+                }
+            }
+        }
+    }
+
+    private func appTiles(_ apps: [LCAppModel]) -> some View {
+        ForEach(apps, id: \.self) { app in
+            LCAppBanner(appModel: app, delegate: self, grid: true)
+                .frame(height: LCAppBannerRootView.tileHeight)
+        }
+    }
+
+    func folderMenu(for app: LCAppModel) -> UIMenu? {
+        guard gridLayout, !app.uiIsHidden, let key = folderKey(for: app) else { return nil }
+        let assignments = folders
+        let visibleFolders = Set(sharedModel.apps.compactMap { folderKey(for: $0) }.compactMap { assignments[$0] })
+        var actions = visibleFolders.sorted().map { folder in
+            UIAction(title: folder, state: assignments[key] == folder ? .on : .off) { _ in
+                assignFolder(folder, to: key)
+            }
+        }
+        actions.append(UIAction(title: String(localized: "New Folder"), image: UIImage(systemName: "folder.badge.plus")) { _ in
+            Task { @MainActor in
+                guard let name = await folderNameInput.open()?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !name.isEmpty else { return }
+                assignFolder(name, to: key)
+            }
+        })
+        if assignments[key] != nil {
+            actions.append(UIAction(title: String(localized: "Remove from Folder")) { _ in
+                assignFolder(nil, to: key)
+            })
+        }
+        return UIMenu(title: String(localized: "Move to Folder"), image: UIImage(systemName: "folder"), children: actions)
+    }
+
+    private func assignFolder(_ name: String?, to key: String) {
+        var assignments = folders
+        assignments[key] = name
+        if let data = try? JSONEncoder().encode(assignments) {
+            folderData = data
+        }
+    }
     
     @EnvironmentObject private var sharedModel : SharedModel
     @EnvironmentObject private var sharedAppSortManager : LCAppSortManager
@@ -131,14 +250,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 })
                 .hidden()
                 
-                LazyVStack {
-                    ForEach(filteredApps, id: \.self) { app in
-                        LCAppBanner(appModel: app, delegate: self)
-                    }
-                    .transition(.scale)
-                }
+                visibleAppCollection
                 .padding()
-                .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredApps)
 
                 VStack {
                     if LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
@@ -150,9 +263,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                     Spacer()
                                 }
                                 
-                                ForEach(filteredHiddenApps, id: \.self) { app in
-                                    LCAppBanner(appModel: app, delegate: self)
-                                }
+                                appCollection(filteredHiddenApps)
                                 .transition(.scale)
                                 
                             }
@@ -172,10 +283,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                     .font(.system(.title2).bold())
                                 Spacer()
                             }
-                            ForEach(filteredHiddenApps, id: \.self) { app in
-                                if sharedModel.isHiddenAppUnlocked {
-                                    LCAppBanner(appModel: app, delegate: self)
-                                } else {
+                            if sharedModel.isHiddenAppUnlocked {
+                                appCollection(filteredHiddenApps)
+                            } else {
+                                ForEach(filteredHiddenApps, id: \.self) { _ in
                                     LCAppSkeletonBanner()
                                 }
                             }
@@ -204,6 +315,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
+            .overlay(alignment: .bottom) {
+                if completedInstall != nil && !installprogressVisible {
+                    Label("App installed", systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.bottom, 12)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: completedInstall)
+            .task(id: completedInstall) {
+                guard let install = completedInstall else { return }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled, completedInstall == install else { return }
+                completedInstall = nil
+            }
             .coordinateSpace(name: "scroll")
             .onAppear {
                 if !didAppear {
@@ -259,6 +389,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        Picker("Layout", selection: $gridLayout) {
+                            Label("List", systemImage: "list.bullet").tag(false)
+                            Label("Grid", systemImage: "square.grid.2x2").tag(true)
+                        }
                         Picker("Sort by", selection: $sharedAppSortManager.appSortType) {
                             ForEach(AppSortType.allCases, id: \.self) { sortType in
                                 Label(sortType.displayName, systemImage: sortType.systemImage)
@@ -280,7 +414,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             }
                         }
                     } label: {
-                        Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
+                        Label("Layout and sort", systemImage: gridLayout ? "square.grid.2x2" : "line.3.horizontal.decrease.circle")
                     }
                 }
             }
@@ -349,6 +483,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 generatedIconStyleSelector.close(result: nil)
             }
         }
+        .textFieldAlert(
+            isPresented: $folderNameInput.show,
+            title: String(localized: "New Folder"),
+            text: $folderNameInput.initVal,
+            placeholder: String(localized: "Folder name"),
+            action: { folderNameInput.close(result: $0) },
+            actionCancel: { _ in folderNameInput.close(result: nil) }
+        )
         .textFieldAlert(
             isPresented: $webViewUrlInput.show,
             title:  "lc.appList.enterUrlTip".loc,
@@ -741,6 +883,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             finalNewApp.fixFilePickerNew = appToReplace.appInfo.fixFilePickerNew
             finalNewApp.fixLocalNotification = appToReplace.appInfo.fixLocalNotification
             finalNewApp.lastLaunched = appToReplace.appInfo.lastLaunched
+            finalNewApp.installationDate = appToReplace.appInfo.installationDate
             finalNewApp.jitLaunchScriptJs = appToReplace.appInfo.jitLaunchScriptJs
             finalNewApp.multitaskSpecified = appToReplace.appInfo.multitaskSpecified
             finalNewApp.classicMode = appToReplace.appInfo.classicMode
@@ -749,19 +892,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } else {
             // enable SDK version spoof by defalut
             finalNewApp.spoofSDKVersion = true
+            finalNewApp.installationDate = Date.now
         }
-        finalNewApp.installationDate = Date.now
         
         DispatchQueue.main.async {
             if let appToReplace {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
                 
                 if appToReplace.uiIsHidden {
-                    sharedModel.hiddenApps.removeAll { $0 == appToReplace }
-                    sharedModel.hiddenApps.append(newAppModel)
+                    if let index = sharedModel.hiddenApps.firstIndex(of: appToReplace) {
+                        sharedModel.hiddenApps[index] = newAppModel
+                    } else {
+                        sharedModel.hiddenApps.append(newAppModel)
+                    }
                 } else {
-                    sharedModel.apps.removeAll { $0 == appToReplace }
-                    sharedModel.apps.append(newAppModel)
+                    if let index = sharedModel.apps.firstIndex(of: appToReplace) {
+                        sharedModel.apps[index] = newAppModel
+                    } else {
+                        sharedModel.apps.append(newAppModel)
+                    }
                 }
 
             } else {
@@ -776,6 +925,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
 
             self.installprogressVisible = false
+            self.completedInstall = UUID()
+            UIAccessibility.post(notification: .announcement, argument: String(localized: "App installed"))
         }
     }
     
@@ -971,6 +1122,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     func removeApp(app: LCAppModel) {
         DispatchQueue.main.async {
+            if let key = folderKey(for: app), folders[key] != nil {
+                assignFolder(nil, to: key)
+            }
             sharedModel.apps.removeAll { now in
                 return app == now
             }

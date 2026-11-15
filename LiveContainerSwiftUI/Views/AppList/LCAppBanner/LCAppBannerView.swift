@@ -8,8 +8,11 @@ import UIKit
 
 final class LCAppBannerRootView: UIView {
     static let bannerHeight: CGFloat = 88
+    static let tileHeight: CGFloat = 104
 
     let runControl = LCAppBannerRunControl()
+    let tileButton = UIButton(type: .system)
+    private let grid: Bool
 
     private let visualBackgroundView = UIView()
     private let iconImageView = UIImageView()
@@ -26,17 +29,17 @@ final class LCAppBannerRootView: UIView {
     private let detailStack = UIStackView()
 
     override var intrinsicContentSize: CGSize {
-        CGSize(width: UIView.noIntrinsicMetric, height: Self.bannerHeight)
+        CGSize(width: UIView.noIntrinsicMetric, height: grid ? Self.tileHeight : Self.bannerHeight)
     }
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(grid: Bool) {
+        self.grid = grid
+        super.init(frame: .zero)
         setupView()
     }
 
     required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupView()
+        return nil
     }
 
     private func setupView() {
@@ -69,13 +72,20 @@ final class LCAppBannerRootView: UIView {
         nameStack.translatesAutoresizingMaskIntoConstraints = false
         nameStack.axis = .horizontal
         nameStack.alignment = .center
-        nameStack.spacing = 8
+        nameStack.spacing = grid ? 2 : 8
         nameStack.addArrangedSubview(nameLabel)
         nameStack.addArrangedSubview(sharedBadge)
         nameStack.addArrangedSubview(jitBadge)
         nameStack.addArrangedSubview(bit32Badge)
         nameStack.addArrangedSubview(lockBadge)
-        nameStack.addArrangedSubview(nameSpacer)
+        if !grid {
+            nameStack.addArrangedSubview(nameSpacer)
+        }
+
+        if grid {
+            setupTile()
+            return
+        }
 
         detailStack.translatesAutoresizingMaskIntoConstraints = false
         detailStack.axis = .vertical
@@ -117,6 +127,40 @@ final class LCAppBannerRootView: UIView {
         ])
     }
 
+    private func setupTile() {
+        nameLabel.font = .preferredFont(forTextStyle: .caption2)
+        nameLabel.adjustsFontForContentSizeCategory = true
+        nameLabel.numberOfLines = 1
+        iconImageView.layer.cornerRadius = 15
+        addSubview(iconImageView)
+        addSubview(nameStack)
+
+        runControl.translatesAutoresizingMaskIntoConstraints = false
+        runControl.isUserInteractionEnabled = false
+        runControl.accessibilityElementsHidden = true
+        addSubview(runControl)
+
+        tileButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(tileButton)
+        NSLayoutConstraint.activate([
+            iconImageView.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            iconImageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            iconImageView.widthAnchor.constraint(equalToConstant: 60),
+            iconImageView.heightAnchor.constraint(equalToConstant: 60),
+            nameStack.topAnchor.constraint(equalTo: iconImageView.bottomAnchor, constant: 6),
+            nameStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            nameStack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+            runControl.centerXAnchor.constraint(equalTo: iconImageView.centerXAnchor),
+            runControl.centerYAnchor.constraint(equalTo: iconImageView.centerYAnchor),
+            runControl.widthAnchor.constraint(equalToConstant: 56),
+            runControl.heightAnchor.constraint(equalToConstant: 32),
+            tileButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+            tileButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            tileButton.topAnchor.constraint(equalTo: topAnchor),
+            tileButton.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
     private func configureLabel(_ label: UILabel, font: UIFont) {
         label.font = font
         label.numberOfLines = 1
@@ -155,6 +199,19 @@ final class LCAppBannerRootView: UIView {
         lockBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
         bit32Badge.isHidden = !model.uiIs32bit
         bit32Badge.backgroundColor = UIColor(named: "32BitBadgeColor") ?? .systemBlue
+
+        if grid {
+            runControl.isHidden = !model.isSigningInProgress
+            tileButton.isEnabled = !model.isAppRunning && !model.isSigningInProgress
+            tileButton.accessibilityLabel = model.displayName
+            let badges = [
+                sharedBadge.isHidden ? nil : String(localized: "Shared app"),
+                jitBadge.isHidden ? nil : String(localized: "Requires JIT"),
+                bit32Badge.isHidden ? nil : String(localized: "32-bit app"),
+                lockBadge.isHidden ? nil : String(localized: "Locked")
+            ].compactMap { $0 }
+            tileButton.accessibilityValue = badges.joined(separator: ", ")
+        }
 
         visualBackgroundView.backgroundColor = dynamicColors
             ? mainColor.withAlphaComponent(0.5)

@@ -16,14 +16,17 @@ struct LCAppBannerConfiguration {
 
 final class LCAppBannerViewController: UIViewController, UIContextMenuInteractionDelegate, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
         
-    private let delegate: LCAppBannerDelegate
-    private let bannerView = LCAppBannerRootView()
+    var delegate: LCAppBannerDelegate
+    private let bannerView: LCAppBannerRootView
+    private let grid: Bool
     private var configuration: LCAppBannerConfiguration
     private var exportTemporaryDirectory: URL?
     
-    init(delegate: LCAppBannerDelegate, config: LCAppBannerConfiguration) {
+    init(delegate: LCAppBannerDelegate, config: LCAppBannerConfiguration, grid: Bool = false) {
         self.delegate = delegate
         self.configuration = config
+        self.grid = grid
+        self.bannerView = LCAppBannerRootView(grid: grid)
         super.init(nibName: nil, bundle: nil)
     }
     
@@ -38,10 +41,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        preferredContentSize = CGSize(width: 0, height: LCAppBannerRootView.bannerHeight)
+        preferredContentSize = CGSize(width: 0, height: grid ? LCAppBannerRootView.tileHeight : LCAppBannerRootView.bannerHeight)
         bannerView.runControl.addTarget(self, action: #selector(runButtonTapped), for: .touchUpInside)
         bannerView.addInteraction(UIContextMenuInteraction(delegate: self))
 
+        if grid {
+            bannerView.tileButton.addTarget(self, action: #selector(runButtonTapped), for: .touchUpInside)
+            return
+        }
         let doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(bannerDoubleTapped))
         doubleTapGesture.numberOfTapsRequired = 2
         doubleTapGesture.cancelsTouchesInView = false
@@ -219,6 +226,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             options: .displayInline,
             children: sectionChildren
         ))
+        if let folderMenu = delegate.folderMenu(for: configuration.model) {
+            menuChildren.append(folderMenu)
+        }
         return UIMenu(title: "", children: menuChildren)
     }
 
