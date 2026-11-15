@@ -283,17 +283,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                     .font(.system(.title2).bold())
                                 Spacer()
                             }
-                            if sharedModel.isHiddenAppUnlocked {
-                                appCollection(filteredHiddenApps)
-                            } else {
-                                ForEach(filteredHiddenApps, id: \.self) { _ in
-                                    LCAppSkeletonBanner()
+                            Group {
+                                if sharedModel.isHiddenAppUnlocked {
+                                    appCollection(filteredHiddenApps)
+                                } else {
+                                    ForEach(filteredHiddenApps, id: \.self) { _ in
+                                        LCAppSkeletonBanner()
+                                    }
+                                    .onTapGesture {
+                                        Task { await authenticateUser() }
+                                    }
                                 }
                             }
                             .animation(.easeInOut, value: sharedModel.isHiddenAppUnlocked)
-                            .onTapGesture {
-                                Task { await authenticateUser() }
-                            }
                         }
                         .padding()
                         .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
