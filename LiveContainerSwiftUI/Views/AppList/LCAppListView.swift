@@ -8,6 +8,7 @@
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 class SearchContext: ObservableObject {
     @Published var query: String = ""
@@ -239,8 +240,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         _installOptions = State(initialValue: [])
     }
     
-    var body: some View {
-        NavigationView {
+    private var appScrollView: some View {
             ScrollView {
                 NavigationLink(
                     destination: navigateTo,
@@ -314,19 +314,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
 
             }
+    }
+
+    @ViewBuilder
+    private var installConfirmation: some View {
+        if completedInstall != nil && !installprogressVisible {
+            Label("App installed", systemImage: "checkmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.bottom, 12)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            appScrollView
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
-            .overlay(alignment: .bottom) {
-                if completedInstall != nil && !installprogressVisible {
-                    Label("App installed", systemImage: "checkmark.circle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.regularMaterial, in: Capsule())
-                        .padding(.bottom, 12)
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                }
-            }
+            .overlay(alignment: .bottom) { installConfirmation }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: completedInstall)
             .task(id: completedInstall) {
                 guard let install = completedInstall else { return }

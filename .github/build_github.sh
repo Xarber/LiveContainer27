@@ -41,8 +41,9 @@ mv ./tmp/SideStoreSupport.framework Payload/LiveContainer.app/Frameworks
 
 # download SideStore
 cd tmp
-wget https://github.com/Xarber/SideStore27/releases/download/nightly/SideStore.ipa
-unzip SideStore.ipa
+wget https://github.com/Xarber/SideStore27/releases/download/nightly/SideStore.ipa || exit 1
+shasum -a 256 SideStore.ipa || exit 1
+unzip SideStore.ipa || exit 1
 cd ..
 
 # SideStore
